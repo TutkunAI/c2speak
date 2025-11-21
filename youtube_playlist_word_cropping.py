@@ -45,10 +45,39 @@ def run_ffmpeg_conv(in_path: Path, out_path: Path, sr: int = 8000, ch: int = 1):
 # ---------- download ----------
 def download_playlist_audio(url: str, outdir: Path) -> List[Path]:
     outdir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-detect cookies.txt
+    possible_cookie_locations = [
+        Path("cookies.txt"),
+        Path("/content/cookies.txt"),
+        Path("cookies/cookies.txt"),
+    ]
+
+    cookie_file = None
+    for p in possible_cookie_locations:
+        if p.exists():
+            cookie_file = str(p)
+            print(f"Using cookies file: {cookie_file}")
+            break
+
+    if cookie_file is None:
+        print("WARNING: cookies.txt not found — downloads may fail for restricted videos.\n"
+              "Place cookies.txt in the same folder as the script or /content/ in Colab.")
+
+    # yt-dlp options
     opts = {
         "ignoreerrors": True,
-        "quiet": True,
+        "quiet": False,
         "format": "bestaudio/best",
+        "cookiefile": cookie_file,         # <-- ENABLE COOKIES
+        "nocheckcertificate": True,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            )
+        },
         "outtmpl": str(outdir / "%(id)s.%(ext)s"),
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
@@ -56,25 +85,38 @@ def download_playlist_audio(url: str, outdir: Path) -> List[Path]:
             "preferredquality": "192",
         }],
     }
+
     audio_files = []
     with ytdl.YoutubeDL(opts) as y:
-        info = y.extract_info(url, download=False)
+        try:
+            info = y.extract_info(url, download=False)
+        except Exception as e:
+            print(f"Playlist fetch error: {e}")
+            return []
+
         entries = info.get("entries") if info else None
+
         if entries:
             for e in entries:
-                if not e: continue
+                if not e:
+                    continue
                 vid = e.get("id")
+                video_url = f"https://www.youtube.com/watch?v={vid}"
                 try:
-                    print(f"Downloading https://www.youtube.com/watch?v={vid}")
-                    y.download([f"https://www.youtube.com/watch?v={vid}"])
+                    print(f"Downloading {video_url}")
+                    y.download([video_url])
                 except Exception as ex:
                     print(f"Download failed for {vid}: {ex}")
         else:
             y.download([url])
+
+    # Collect audio files
     for f in outdir.iterdir():
-        if f.suffix.lower() in [".m4a", ".mp3", ".webm", ".aac", ".wav"]:
+        if f.suffix.lower() in (".m4a", ".mp3", ".aac", ".webm", ".wav"):
             audio_files.append(f)
+
     return audio_files
+
 
 # ---------- transcription ----------
 def transcribe(audio: Path, model_name="medium", language="en") -> Dict:
