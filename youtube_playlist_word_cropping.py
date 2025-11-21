@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-YouTube playlist → word-level .raw + Codec2 + IPA + features DB
-Pipeline:
-1. Downloads YouTube playlist audio
-2. Transcribes with Whisper
-3. Forced phoneme alignment with WhisperX
-4. Crops words, exports as 8 kHz S16_LE .raw
-5. Runs Codec2 (c2enc) on each .raw, saves to separate folder
-6. Extracts features (Mel spectrogram, pitch, energy) per word
-7. Stores word + IPA phonemes + file paths in SQLite DB
+YouTube playlist → word-level .raw + features DB (NO Codec2 for feature extraction)
+Fix: Features are now extracted from .raw files, not .bit compressed Codec2 files.
+Codec2 encoding is still saved, but not used for features.
 """
 
 import argparse
@@ -111,7 +105,6 @@ def get_word_phoneme_timestamps(audio_path: Path, result: Dict, language="en", d
             phoneme_seq = phoneme_map.get(widx, [])
             phoneme_str = "_".join([p for p in phoneme_seq if p])
             if not phoneme_str:
-                # fallback IPA phonemizer
                 safe_text = re.sub(r"[^A-Za-z']+", "", word_text)
                 try:
                     phoneme_str = phonemize(
@@ -122,18 +115,12 @@ def get_word_phoneme_timestamps(audio_path: Path, result: Dict, language="en", d
                         preserve_punctuation=False,
                         njobs=1,
                     ).replace(" ", "_")
-                except Exception as e:
-                    print(f"Phonemizer failed for '{safe_text}': {e}")
+                except Exception:
                     phoneme_str = sanitize_filename(safe_text)
-            entries.append({
-                "word": word_text.strip(),
-                "start": start,
-                "end": end,
-                "phonemes": phoneme_str
-            })
+            entries.append({"word": word_text.strip(), "start": start, "end": end, "phonemes": phoneme_str})
         return entries
 
-    # fallback: approximate + IPA phonemizer
+    # fallback
     for seg in result.get("segments", []):
         seg_text = seg.get("text", "").strip()
         s, e = seg.get("start", 0.0), seg.get("end", 0.0)
@@ -154,8 +141,7 @@ def get_word_phoneme_timestamps(audio_path: Path, result: Dict, language="en", d
                     preserve_punctuation=False,
                     njobs=1
                 ).replace(" ", "_")
-            except Exception as e:
-                print(f"Phonemizer failed for '{safe_text}': {e}")
+            except Exception:
                 phoneme_str = sanitize_filename(safe_text)
             entries.append({"word": w, "start": start, "end": end, "phonemes": phoneme_str})
     return entries
@@ -181,11 +167,9 @@ def init_db(db_path: Path):
 
 # ---------- feature extraction ----------
 def extract_features(raw_path: Path, sr: int = 8000, n_mels: int = 80):
-    # Load RAW PCM16LE
     y = np.fromfile(raw_path, dtype=np.int16).astype(np.float32) / 32768.0
-    y_t = torch.tensor(y).unsqueeze(0)  # shape: (1, samples)
+    y_t = torch.tensor(y).unsqueeze(0)
 
-    # --- MEL SPECTROGRAM ---
     mel_spec = torchaudio.transforms.MelSpectrogram(
         sample_rate=sr,
         n_fft=512,
@@ -197,17 +181,14 @@ def extract_features(raw_path: Path, sr: int = 8000, n_mels: int = 80):
 
     mel_db = torchaudio.transforms.AmplitudeToDB()(mel_spec).squeeze(0)
 
-    # --- PITCH (F0) ---
     f0 = torchaudio.functional.detect_pitch_frequency(
         y_t,
         sample_rate=sr,
-        frame_time=0.02  # 20 ms frames
+        frame_time=0.02
     ).squeeze(0).numpy()
 
-    # Replace invalid values
     f0 = np.nan_to_num(f0)
 
-    # --- ENERGY (RMS) ---
     rms = torch.sqrt(torch.mean(y_t.unfold(1, 512, 160)**2, dim=2)).squeeze(0)
     rms = rms.numpy()
 
@@ -236,21 +217,18 @@ def crop_save_raw_and_codec2(audio_path: Path, entries: List[Dict], outdir: Path
             crop = audio[int(a*1000):int(b*1000)]
             crop = crop.set_frame_rate(8000).set_channels(1).set_sample_width(2)
 
-            # Save raw
             raw_path = outdir / f"{idx:05d}_{phonemes}.raw"
             crop.export(raw_path, format="raw")
 
-            # Process with Codec2
             c2_out = codec2_outdir / f"{raw_path.stem}.bit"
             bit_rate = "2400"
             subprocess.run([str(codec2_bin), bit_rate, str(raw_path), str(c2_out)], check=True)
 
-            # Extract features
+            # FIX: Extract features from .raw directly
             mel, f0, rms = extract_features(raw_path)
             feat_path = features_dir / f"{raw_path.stem}.npz"
             np.savez_compressed(feat_path, mel=mel, f0=f0, rms=rms)
 
-            # Save to DB
             c.execute('''
                 INSERT INTO words (word, phonemes, start, end, audio_file, codec2_file, features_file)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -283,7 +261,7 @@ def process_playlist(url: str, outroot: Path, tmproot: Path, codec2_bin: Path, m
     for f in files:
         base = f.stem
         t_wav = trans_dir / f"{base}.whisper.wav"
-        print(f"Preparing {base} (16 kHz mono)")
+        print(f"Preparing {base} (16 kHz mono)")
         run_ffmpeg_conv(f, t_wav, sr=16000, ch=1)
 
         print(f"Transcribing {base}")
@@ -297,7 +275,7 @@ def process_playlist(url: str, outroot: Path, tmproot: Path, codec2_bin: Path, m
 
 # ---------- CLI ----------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="YouTube playlist → word-level .raw + Codec2 + IPA + features DB")
+    parser = argparse.ArgumentParser(description="YouTube playlist → word-level .raw + IPA + features (NO .bit decoding)")
     parser.add_argument("--playlist", required=True, help="YouTube playlist URL")
     parser.add_argument("--outdir", default="./output_words", help="Output directory")
     parser.add_argument("--tmpdir", default="./tmp_work", help="Temporary directory")
