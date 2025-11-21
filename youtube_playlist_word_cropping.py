@@ -120,7 +120,7 @@ def download_playlist_audio(url: str, outdir: Path) -> List[Path]:
 
 # ---------- transcription ----------
 def transcribe(audio: Path, model_name="medium", language="en") -> Dict:
-    model = whisper.load_model(model_name)
+    model = whisper.load_model(model_name, device="cuda")
     return model.transcribe(str(audio), language=language, word_timestamps=False)
 
 # ---------- alignment & IPA phonemes ----------
