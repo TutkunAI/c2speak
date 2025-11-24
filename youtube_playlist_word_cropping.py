@@ -120,7 +120,7 @@ def download_playlist_audio(url: str, outdir: Path) -> List[Path]:
 
 # ---------- transcription ----------
 def transcribe(audio: Path, model_name="medium", language="en") -> Dict:
-    model = whisper.load_model(model_name, device="cuda")
+    model = whisper.load_model(model_name, device="cpu")
     return model.transcribe(str(audio), language=language, word_timestamps=False)
 
 # ---------- alignment & IPA phonemes ----------
@@ -307,7 +307,7 @@ def process_playlist(url: str, outroot: Path, tmproot: Path, codec2_bin: Path, m
         run_ffmpeg_conv(f, t_wav, sr=16000, ch=1)
 
         print(f"Transcribing {base}")
-        res = transcribe(t_wav, model_name=model, language=language)
+        res = transcribe(t_wav, model_name="medium", language=language)
 
         entries = get_word_phoneme_timestamps(t_wav, res, language=language, device=device)
         crop_save_raw_and_codec2(f, entries, outroot / base, codec2_bin, codec2_outdir, conn)
